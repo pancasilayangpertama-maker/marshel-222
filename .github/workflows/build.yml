@@ -1,0 +1,80 @@
+name: Build Marshall IX9
+
+# Runs by itself every time you push to main/master. You can also start it by hand:
+# repo -> tab Actions -> "Build Marshall IX9" -> Run workflow.
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write  # only used to attach the zip to a Release when you push a tag such as v1.0.0
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller "pillow<13" numpy
+
+      - name: Draw the logo and icon into assets/
+        continue-on-error: true
+        run: python tools/make_assets.py
+
+      - name: Tests (safety rules - no network code, no obfuscation)
+        run: python -m unittest discover -s tests -v
+
+      - name: Build the app (folder mode; Windows asks for Administrator when it starts)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force assets | Out-Null
+          $icon = @()
+          if (Test-Path assets/icon.ico) { $icon = @("--icon", "assets/icon.ico") }
+          pyinstaller --noconfirm --clean --onedir --windowed --uac-admin --name MarshallIX9 @icon --add-data "assets;assets" main.py
+
+      - name: Self-test the built exe (read-only, changes nothing)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "dist/MarshallIX9/MarshallIX9.exe"
+          $out = Join-Path $PWD "selftest.txt"
+          $p = Start-Process -FilePath $exe -ArgumentList "--selftest", $out -Wait -PassThru
+          if (Test-Path $out) {
+            "### Self-test of MarshallIX9.exe" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+            Get-Content $out | ForEach-Object { "    $_" } | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+            Get-Content $out
+          } else {
+            Write-Warning "The exe did not write a self-test file."
+          }
+          exit $p.ExitCode
+
+      - name: Checksum of the exe
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist/MarshallIX9/MarshallIX9.exe -Algorithm SHA256).Hash
+          "### SHA256 of MarshallIX9.exe" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          "    $hash" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          Write-Host "SHA256: $hash"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: MarshallIX9-win64
+          path: dist/MarshallIX9
+
+      - name: Publish a Release (only when you push a tag such as v1.0.0)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Compress-Archive -Path dist/MarshallIX9 -DestinationPath MarshallIX9-win64.zip
+          gh release create "${{ github.ref_name }}" MarshallIX9-win64.zip --title "Marshall IX9 ${{ github.ref_name }}" --generate-notes
